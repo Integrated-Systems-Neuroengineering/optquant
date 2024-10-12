@@ -1,10 +1,16 @@
 import jax
 import jax.numpy as jnp
+from tqdm import tqdm
 import xarray
 import numpyro.distributions as dists
 from functools import partial
+from .utils import compute_even_levels
 
 jax.config.update("jax_enable_x64", True)
+
+
+def enob(vector_length):
+    return jnp.log2(2 * jnp.e * jnp.pi * 0.25 * vector_length) * 0.5
 
 
 def log_pdf_n(n, vector_length: int, distribution: str = "binary", fixed: int = None):
@@ -112,7 +118,6 @@ def log_pdf_yn(
     n,
     thresholds: jnp.ndarray,
     noise_std: float = None,
-    vector_length: int = None,
     distribution: str = None,
     fixed=None,
 ):
@@ -166,7 +171,7 @@ def log_pdf_y(
 
 
 @partial(jax.jit, static_argnames=("vector_length", "distribution"))
-def MIbits(
+def MI_noise(
     vector_length: int,
     thresholds: jnp.ndarray,
     noise_std: float = 0,
@@ -239,12 +244,15 @@ def sweep(
     num_bits = jnp.atleast_1d(num_bits)
 
     MIs = []
-    for b in num_bits:
+    for b in tqdm(num_bits):
         # compute thresholds
-        thresholds = compute_thresholds(b, phase, scale, distribution, vector_length)
+        # thresholds = compute_thresholds(b, phase, scale, distribution, vector_length)
+        thresholds = compute_even_levels(
+            2**b, alpha=scale, beta=phase, offset_fixed=fixed
+        )
 
         MIs.append(
-            MIbits(
+            MI_noise(
                 vector_length=vector_length,
                 thresholds=thresholds,
                 noise_std=noise_std,
@@ -271,44 +279,22 @@ def sweep(
     return res
 
 
-def compute_thresholds(
-    num_bits: int,
-    phase: jnp.ndarray,
-    scale: jnp.ndarray,
-    distribution: str,
-    vector_length: int,
-):
-    if distribution == "bipolar":
-        thr = (
-            (
-                (
-                    jnp.arange((1 << num_bits) + 1)
-                    - (1 << (num_bits - 1))
-                    + jnp.atleast_1d(phase)[..., jnp.newaxis]
-                )
-                * jnp.atleast_1d(scale)[..., jnp.newaxis]
-                * 2
-            )
-            .at[..., -1]
-            .set(jnp.inf)
-            .at[..., 0]
-            .set(-jnp.inf)
-        )
-    elif distribution == "binary":
-        thr = (
-            (
-                (
-                    jnp.arange((1 << num_bits) + 1)
-                    - (1 << (num_bits - 1))
-                    + vector_length / 2
-                    + 0.5
-                    + jnp.atleast_1d(phase)[..., jnp.newaxis]
-                )
-                * jnp.atleast_1d(scale)[..., jnp.newaxis]
-            )
-            .at[..., -1]
-            .set(jnp.inf)
-            .at[..., 0]
-            .set(-jnp.inf)
-        )
-    return thr.astype(jnp.float_)
+@partial(jax.jit, static_argnums=(2,))
+def MI_nonoise(alpha, beta, K, values, probabilities):
+
+    levels = compute_even_levels(
+        K, alpha, beta, offset_fixed=(values[0] + values[-1]) / 2
+    )
+    alpha, beta = (
+        jnp.atleast_1d(alpha)[..., jnp.newaxis],
+        jnp.atleast_1d(beta)[..., jnp.newaxis],
+    )
+
+    cumprobs = jnp.concat([jnp.array([0.0]), jnp.cumsum(probabilities)])
+
+    p_s = (
+        cumprobs[jnp.searchsorted(values, levels[..., 1:])]
+        - cumprobs[jnp.searchsorted(values, levels[..., :-1])]
+    )
+
+    return -jnp.sum(p_s * jnp.log2(p_s), where=p_s > 0, axis=-1)

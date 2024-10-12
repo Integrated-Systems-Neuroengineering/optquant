@@ -5,9 +5,11 @@ from .prob import (
     log_pdf_x_n,
     log_pdf_y_n,
     log_pdf_yn,
-    MIbits,
+    MI_noise,
+    MI_nonoise,
     sweep,
-    compute_thresholds,
+    enob,
 )
 
-from .model import model
+from .utils import share_axis, compute_even_levels
+from .plot import plot_quantization, plot_sweep
