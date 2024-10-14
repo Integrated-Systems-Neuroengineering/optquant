@@ -5,10 +5,11 @@ from .prob import (
     log_pdf_x_n,
     log_pdf_y_n,
     log_pdf_yn,
-    MI_noise,
+    MI,
     MI_nonoise,
     sweep,
     enob,
+    EmpiricalDistribution,
 )
 
 from .utils import share_axis, compute_even_levels
