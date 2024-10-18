@@ -10,6 +10,9 @@ from .prob import (
     sweep,
     enob,
     EmpiricalDistribution,
+    uniform_normal_partition,
+    H_normal_partition,
+    dH_normal_partition,
 )
 
 from .utils import share_axis, compute_even_levels

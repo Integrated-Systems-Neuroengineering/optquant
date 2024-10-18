@@ -232,7 +232,7 @@ def log_pdf_y_n(y, n, thresholds: jnp.ndarray, noise_std: float = 0.1):
     lower = thresholds[*idx, y]
 
     return jnp.where(
-        noise_std <= 1e-12,
+        noise_std <= 1e-16,
         jnp.where(
             (n >= lower) & (n < upper),
             0.0,
@@ -405,3 +405,111 @@ def MI_nonoise(alpha, beta, K, values, probabilities):
     )
 
     return -jnp.sum(p_s * jnp.log2(p_s), where=p_s > 0, axis=-1)
+
+
+p_Y = jax.scipy.stats.norm.pdf
+F_Y = jax.scipy.stats.norm.cdf
+prec = 1e-16
+
+
+@partial(jax.jit, static_argnames=("levels"))
+def H_normal_partition(a, b, levels, mu=0.0, sigma=1.0):
+    inner_levels = levels - 2
+
+    def step(y, carry):
+        lower_edge = a * (y - inner_levels / 2) + b
+        upper_edge = lower_edge + a
+        # if the bin is very small, use a linear approximation of the integral
+        term1 = jnp.where(
+            a > 1e-3,
+            F_Y(upper_edge, loc=mu, scale=sigma) - F_Y(lower_edge, loc=mu, scale=sigma),
+            a * p_Y(lower_edge + a / 2, loc=mu, scale=sigma),
+        )
+        term2 = -jnp.log2(term1)
+        prod = term1 * term2
+        return carry + jnp.where(term1 > prec, prod, 0.0)
+
+    # account for the entropy of the outer bins
+    outer = 0.0
+    term1 = F_Y(b - a * inner_levels / 2, loc=mu, scale=sigma)
+    prod = term1 * -jnp.log2(term1)
+    outer += jnp.where(term1 > prec, prod, 0.0)
+    term1 = 1 - F_Y(b + a * inner_levels / 2, loc=mu, scale=sigma)
+    prod = term1 * -jnp.log2(term1)
+    outer += jnp.where(term1 > prec, prod, 0.0)
+    return jax.lax.fori_loop(0, levels - 2, step, outer)
+
+
+@partial(jax.jit, static_argnames=("levels"))
+def dH_normal_partition(a, b, levels, mu=0.0, sigma=1.0):
+    inner_levels = levels - 2
+
+    def step(y, carry):
+        lower_edge = a * (y - inner_levels / 2) + b
+        upper_edge = lower_edge + a
+        # if the bin is very small, use a linear approximation of the integral
+        term1 = jnp.where(
+            a > 1e3,
+            F_Y(upper_edge, loc=mu, scale=sigma) - F_Y(lower_edge, loc=mu, scale=sigma),
+            a * p_Y(lower_edge + a / 2, loc=mu, scale=sigma),
+        )
+        term2 = -jnp.log2(term1)
+        dterm1_a = p_Y(upper_edge, loc=mu, scale=sigma) * (
+            y - inner_levels / 2 + 1
+        ) - p_Y(lower_edge, loc=mu, scale=sigma) * (y - inner_levels / 2)
+        dterm1_b = p_Y(upper_edge, loc=mu, scale=sigma) - p_Y(
+            lower_edge, loc=mu, scale=sigma
+        )
+        dterm1 = jnp.array([dterm1_a, dterm1_b])
+        prod = dterm1 * (term2 - 1.0)
+        return carry + jnp.where(term1 > prec, prod, 0.0)
+
+    # account for the entropy of the outer bins
+    outer = jnp.array([0.0, 0.0])
+    term1 = F_Y(b - a * inner_levels / 2, loc=mu, scale=sigma)
+    term2 = -jnp.log2(term1)
+
+    dterm1_a = p_Y(b - a * inner_levels / 2, loc=mu, scale=sigma) * -inner_levels / 2
+    dterm1_b = p_Y(b - a * inner_levels / 2, loc=mu, scale=sigma)
+    dterm1 = jnp.array([dterm1_a, dterm1_b])
+    prod = dterm1 * (term2 - 1.0)
+    outer += jnp.where(term1 > prec, prod, 0.0)
+
+    term1 = 1 - F_Y(b + a * inner_levels / 2, loc=mu, scale=sigma)
+    term2 = -jnp.log2(term1)
+
+    dterm1_a = -p_Y(b + a * inner_levels / 2, loc=mu, scale=sigma) * inner_levels / 2
+    dterm1_b = -p_Y(b + a * inner_levels / 2, loc=mu, scale=sigma)
+    dterm1 = jnp.array([dterm1_a, dterm1_b])
+    prod = dterm1 * (term2 - 1.0)
+    outer += jnp.where(term1 > prec, prod, 0.0)
+
+    return jax.lax.fori_loop(0, levels - 2, step, outer)
+
+
+dH_normal_parition_jax = jax.grad(H_normal_partition, argnums=(0, 1))
+
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "levels",
+        "num_steps",
+    ),
+)
+def uniform_normal_partition(levels, eta=0.1, mu=0.0, sigma=1.0, num_steps=2000):
+    def cond(idab):
+        i, delta, _, _ = idab
+        return (i < num_steps) * (delta > 1e-8)
+
+    def step(idab):
+        i, _, a, b = idab
+        # (da, db) = dH(a, b, levels=levels, mu=mu, sigma=sigma)
+        (da, db) = dH_normal_partition(a, b, levels=levels, mu=mu, sigma=sigma)
+        a += eta * da
+        b += eta * db
+        return (i + 1, jnp.sqrt(da**2 + db**2), a, b)
+
+    eta *= sigma / levels
+    a, b = 1.0 / levels * sigma, 0.0
+    return jax.lax.while_loop(cond, step, (0, jnp.inf, a, b))[2:]
